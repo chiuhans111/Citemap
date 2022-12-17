@@ -1,83 +1,82 @@
 import { toRaw } from "vue"
+import { MetadataAPI, Metadata } from "./MetadataAPI"
 
 
 class CiteMap {
-    api_token = null
+    api = new MetadataAPI()
     map = {}
-    constructor(api_token) {
-        this.api_token = api_token
+
+    constructor(api) {
+        this.api = api
     }
 
-    async call_api(url) {
-        const req = new Request(
-            url, {
-            method: "get",
-            // mode: "cors",
-            headers: {
-                "authorization": this.api_token,
-                "Accept": "application/json"
-            }
+
+    async metadata(doi) {
+        return await this.api.get(doi)
+    }
+
+    createObj(doi) {
+        return {
+            explored: false,
+            score: 1,
+            metadata: new Metadata(doi)
         }
-        )
-        console.log('requesting', req)
-        const res = await fetch(req)
-        return res
-    }
-
-    async metadata(dois) {
-        return await (await this.call_api("https://opencitations.net/index/coci/api/v1/metadata/" + dois.join("__"))).json()
     }
 
 
-    async explore(dois) {
-        if (typeof (dois) == "string") dois = dois.split('\n')
-        dois = dois.filter(x => !(x in this.map) || this.map[x].explored == false)
-        const results = await this.metadata(dois)
-        for (const result of results) {
-            const obj = this.map[result.doi] || {}
-            obj.doi = result.doi
-            obj.title = result.title
-            obj.author = result.author
-            obj.citations = {} || obj.citations
-            obj.references = {} || obj.references
+    async explore(doi) {
+        if (doi in this.map && this.map[doi].explored)
+            return
 
-            result.citation.split(';').map(x => x.trim()).filter(x => x.length > 0).map(x => obj.citations[x] = true)
-            result.reference.split(';').map(x => x.trim()).filter(x => x.length > 0).map(x => obj.references[x] = true)
+        const result = await this.metadata(doi)
+        console.log(result)
 
-            obj.year = parseInt(result.year)
-            obj.score = obj.score || 1
-            obj.explored = true
-            this.map[result.doi] = obj
+        if (this.map[doi] === undefined) this.map[doi] = this.createObj(doi)
 
-            Object.keys(obj.citations)
-                .map(x => this.map[x] = this.map[x] || { doi: x, explored: false, score: 1, references: {}, citations: {} })
+        const obj = this.map[doi]
 
-            Object.keys(obj.references)
-                .map(x => this.map[x] = this.map[x] || { doi: x, explored: false, score: 1, references: {}, citations: {} })
+        obj.metadata = result
+        obj.explored = true
 
-            Object.keys(obj.citations).map(x => { this.map[x].references[obj.doi] = true })
-            Object.keys(obj.references).map(x => { this.map[x].citations[obj.doi] = true })
 
+        for (const x in obj.metadata.citations) {
+            this.map[x] = this.map[x] || this.createObj(x)
+            this.map[x].metadata.references[doi] = true
+        }
+
+        for (const x in obj.metadata.references) {
+            this.map[x] = this.map[x] || this.createObj(x)
+            this.map[x].metadata.citations[doi] = true
         }
     }
 
     async expand() {
         const items = this.items().filter(x => !x.explored)
-        if (items.length > 0)
-            await this.explore(items.slice(0, 10).map(x => x.doi))
+        if (items.length > 0) {
+            await Promise.all(items.slice(0, 10).map(x => {
+                return this.explore(x.metadata.doi)
+            }))
+        }
     }
 
     iterate() {
         const temp = {}
         let bank = 0
-        const ratio = 0.8
+        const ratio = 0.6
         const map = toRaw(this.map)
 
-        Object.keys(map).map(x => temp[x] = 0)
-        Object.keys(map).map(x => {
+        for (const x in map) {
+            temp[x] = 0
+        }
+
+        for (const x in map) {
             const item = map[x]
-            const reference_count = Object.keys(item.references).length
-            const citation_count = Object.keys(item.citations).length
+
+            const references = Object.keys(item.metadata.references)
+            const citations = Object.keys(item.metadata.citations)
+
+            const reference_count = references.length
+            const citation_count = citations.length
 
 
             const fake_reference = Math.max(0, 40 - reference_count)
@@ -86,23 +85,50 @@ class CiteMap {
             const payment = item.score * ratio / (reference_count + fake_reference)
             const generate = item.score * (1 - ratio) / (citation_count + fake_citation)
 
+            for (let doi of references) {
+                if (doi in temp) temp[doi] += payment
+                else bank += payment
+            }
 
-            Object.keys(item.references).map(x => temp[x] += payment)
-            Object.keys(item.citations).map(x => temp[x] += generate)
+            for (let doi of citations) {
+                if (doi in temp) temp[doi] += generate
+                else bank += payment
+            }
 
             bank += fake_reference * payment
             bank += fake_citation * generate
 
-        })
+        }
 
+        const count = Object.keys(this.map).length
 
-        Object.keys(temp).map(x => this.map[x].score = temp[x] + bank / Object.keys(this.map).length)
+        for (const x in temp) {
+            this.map[x].score = temp[x] + bank / count
+        }
     }
 
     items() {
         const items = Object.keys(this.map).map(x => this.map[x])
         items.sort((a, b) => b.score - a.score)
         return items
+    }
+
+    displayItems() {
+        const items = this.items()
+        const group = {}
+
+        for (let i of items) {
+            if (!i.explored) continue
+            const key = i.metadata.year
+            if (group[key] === undefined) group[key] = {
+                key, items: []
+            }
+            group[key].items.push(i)
+        }
+
+        const keys = Object.keys(group)
+        keys.sort((a, b) => a - b)
+        return keys.map(x => group[x])
     }
 }
 
